@@ -1,7 +1,6 @@
 import { Metadata } from "next"
 import Link from "next/link"
 
-import { Announcement } from "@/components/announcement"
 import { CardsDemo } from "@/components/cards"
 import { ExamplesNav } from "@/components/examples-nav"
 import {
@@ -58,7 +57,6 @@ export default function IndexPage() {
           }}
         />
         <PageHeader className="relative z-10">
-          <Announcement />
           <PageHeaderHeading className="max-w-4xl">
             <span className="flex items-baseline gap-2 sm:gap-3">
               <span className="font-waldenburg-ht leading-[0.95] font-bold tracking-[-0.03em]">
