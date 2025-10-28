@@ -315,7 +315,8 @@
       "registryDependencies": [
         "https://ui.elevenlabs.io/r/voice-button.json",
         "button",
-        "scroll-area"
+        "scroll-area",
+        "https://ui.elevenlabs.io/r/shimmering-text.json"
       ],
       "files": [
         {

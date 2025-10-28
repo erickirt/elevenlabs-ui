@@ -326,7 +326,7 @@ export const Index: Record<string, any> = {
     name: "realtime-transcriber-01",
     description: "Scribe V2 Realtime Transcriber",
     type: "registry:block",
-    registryDependencies: ["https://ui.elevenlabs.io/r/voice-button.json","button","scroll-area"],
+    registryDependencies: ["https://ui.elevenlabs.io/r/voice-button.json","button","scroll-area","https://ui.elevenlabs.io/r/shimmering-text.json"],
     files: [{
       path: "registry/elevenlabs-ui/blocks/realtime-transcriber-01/page.tsx",
       type: "registry:page",

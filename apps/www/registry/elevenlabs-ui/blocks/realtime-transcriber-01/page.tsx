@@ -1,379 +1,49 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
-import { Copy } from "lucide-react"
-import { Streamdown } from "streamdown"
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useScribe } from "@elevenlabs/react"
+import { AnimatePresence, motion } from "framer-motion"
+import { Copy, GaugeCircleIcon } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import { useDebounce } from "@/registry/elevenlabs-ui/hooks/use-debounce"
+import { usePrevious } from "@/registry/elevenlabs-ui/hooks/use-previous"
 import { Button } from "@/registry/elevenlabs-ui/ui/button"
-import { ScrollArea } from "@/registry/elevenlabs-ui/ui/scroll-area"
 import { ShimmeringText } from "@/registry/elevenlabs-ui/ui/shimmering-text"
 
+import { getScribeToken } from "./actions/get-scribe-token"
+import { LanguageSelector } from "./components/language-selector"
+
 interface RecordingState {
-  isRecording: boolean
-  isProcessing: boolean
-  isConnecting: boolean
-  transcript: string
-  partialTranscript: string
   error: string
+  latenciesMs: number[]
 }
 
-// ElevenLabs WebSocket message types
-interface InputAudioChunk {
-  message_type: "input_audio_chunk"
-  audio_base_64: string
-  commit: boolean
-}
-
-interface PartialTranscriptMessage {
-  message_type: "partial_transcript"
-  transcript: string
-}
-
-interface FinalTranscriptMessage {
-  message_type: "final_transcript"
-  transcript: string
-}
-
-interface ErrorMessage {
-  message_type: "error"
-  error: string
-}
-
-type WebSocketMessage =
-  | { message_type: "session_started" }
-  | PartialTranscriptMessage
-  | FinalTranscriptMessage
-  | ErrorMessage
-
-// WebSocket proxy URL - set via environment variable or use default local dev server
-const WEBSOCKET_PROXY_URL =
-  process.env.NEXT_PUBLIC_STT_PROXY_URL || "ws://localhost:3001"
-
-export default function RealtimeTranscriber01() {
-  const [recording, setRecording] = useState<RecordingState>({
-    isRecording: false,
-    isProcessing: false,
-    isConnecting: false,
-    transcript: "",
-    partialTranscript: "",
-    error: "",
-  })
-
-  const audioContextRef = useRef<AudioContext | null>(null)
-  const processorRef = useRef<ScriptProcessorNode | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
-  const websocketRef = useRef<WebSocket | null>(null)
-
-  // Audio refs for sound effects
-  const startSoundRef = useRef<HTMLAudioElement | null>(null)
-  const endSoundRef = useRef<HTMLAudioElement | null>(null)
-  const errorSoundRef = useRef<HTMLAudioElement | null>(null)
-  const prevRecordingRef = useRef(false)
-  const prevErrorRef = useRef("")
-
-  const updateRecording = useCallback((updates: Partial<RecordingState>) => {
-    setRecording((prev) => ({ ...prev, ...updates }))
-  }, [])
-
-  const cleanupStream = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop())
-      streamRef.current = null
-    }
-  }, [])
-
-  const cleanupWebSocket = useCallback(() => {
-    if (websocketRef.current) {
-      websocketRef.current.close()
-      websocketRef.current = null
-    }
-  }, [])
-
-  const stopRecording = useCallback(() => {
-    console.log("[Client] Stopping recording...")
-
-    // Stop audio processing
-    if (processorRef.current) {
-      processorRef.current.disconnect()
-      processorRef.current = null
-    }
-
-    if (audioContextRef.current) {
-      audioContextRef.current.close()
-      audioContextRef.current = null
-    }
-
-    // Send commit to finalize transcription
-    if (websocketRef.current?.readyState === WebSocket.OPEN) {
-      const commitMessage: InputAudioChunk = {
-        message_type: "input_audio_chunk",
-        audio_base_64: "",
-        commit: true,
-      }
-      websocketRef.current.send(JSON.stringify(commitMessage))
-    }
-
-    cleanupStream()
-    updateRecording({ isRecording: false, isProcessing: true })
-  }, [cleanupStream, updateRecording])
-
-  const startRecording = useCallback(async () => {
-    try {
-      console.log("[Client] Starting recording...")
-      updateRecording({
-        transcript: "",
-        partialTranscript: "",
-        error: "",
-        isConnecting: true,
-      })
-
-      // Get user media
-      console.log("[Client] Requesting microphone access...")
-      const stream =
-        await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS)
-      streamRef.current = stream
-      console.log("[Client] Microphone access granted")
-
-      // Connect to WebSocket proxy
-      console.log("[Client] Connecting to WebSocket proxy...")
-      const websocket = new WebSocket(WEBSOCKET_PROXY_URL)
-      websocketRef.current = websocket
-
-      websocket.onopen = () => {
-        console.log("[Client] WebSocket connected")
-      }
-
-      websocket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data) as WebSocketMessage
-
-          switch (data.message_type) {
-            case "session_started":
-              console.log("[Client] Session started")
-              updateRecording({ isConnecting: false, isRecording: true })
-
-              // Start AudioContext to capture raw PCM audio
-              const audioContext = new AudioContext({ sampleRate: 16000 })
-              audioContextRef.current = audioContext
-
-              const source = audioContext.createMediaStreamSource(stream)
-              const processor = audioContext.createScriptProcessor(4096, 1, 1)
-              processorRef.current = processor
-
-              let chunkCount = 0
-              processor.onaudioprocess = (event) => {
-                if (websocket.readyState === WebSocket.OPEN) {
-                  const inputBuffer = event.inputBuffer
-                  const inputData = inputBuffer.getChannelData(0)
-
-                  // Convert Float32Array to PCM16
-                  const pcmData = new Int16Array(inputData.length)
-                  for (let i = 0; i < inputData.length; i++) {
-                    pcmData[i] =
-                      Math.max(-1, Math.min(1, inputData[i])) * 0x7fff
-                  }
-
-                  // Convert to base64
-                  const uint8Array = new Uint8Array(pcmData.buffer)
-                  const base64 = btoa(String.fromCharCode(...uint8Array))
-
-                  chunkCount++
-                  if (chunkCount % 10 === 0) {
-                    console.log(`[Client] Sent ${chunkCount} PCM audio chunks`)
-                  }
-
-                  const message: InputAudioChunk = {
-                    message_type: "input_audio_chunk",
-                    audio_base_64: base64,
-                    commit: false,
-                  }
-
-                  websocket.send(JSON.stringify(message))
-                }
-              }
-
-              source.connect(processor)
-              processor.connect(audioContext.destination)
-
-              console.log(
-                "[Client] AudioContext started, capturing PCM audio..."
-              )
-              break
-
-            case "partial_transcript":
-              console.log("[Client] Partial transcript:", data.transcript)
-              updateRecording({ partialTranscript: data.transcript })
-              break
-
-            case "final_transcript":
-              console.log("[Client] Final transcript:", data.transcript)
-              updateRecording({
-                transcript: data.transcript,
-                partialTranscript: "",
-                isProcessing: false,
-              })
-              cleanupWebSocket()
-              break
-
-            case "error":
-              console.error("[Client] Error from server:", data.error)
-              updateRecording({
-                error: data.error,
-                isProcessing: false,
-                isRecording: false,
-                isConnecting: false,
-              })
-              cleanupWebSocket()
-              break
-          }
-        } catch (err) {
-          console.error("[Client] Failed to parse message:", err)
-        }
-      }
-
-      websocket.onerror = (error) => {
-        console.error("[Client] WebSocket error:", error)
-        updateRecording({
-          error: "Connection error",
-          isRecording: false,
-          isConnecting: false,
-          isProcessing: false,
-        })
-        cleanupStream()
-        cleanupWebSocket()
-      }
-
-      websocket.onclose = (event) => {
-        console.log("[Client] WebSocket closed:", event.code, event.reason)
-        if (event.code === 1008) {
-          // Policy violation - likely quota exceeded
-          updateRecording({
-            error: "Quota exceeded. Please try again later.",
-            isRecording: false,
-            isConnecting: false,
-            isProcessing: false,
-          })
-        }
-      }
-    } catch (err) {
-      console.error("[Client] Start recording error:", err)
-      updateRecording({
-        error: err instanceof Error ? err.message : "Failed to start recording",
-        isRecording: false,
-        isConnecting: false,
-      })
-      cleanupStream()
-      cleanupWebSocket()
-    }
-  }, [cleanupStream, cleanupWebSocket, updateRecording])
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Only trigger on Alt key, not when typing in input fields
-      if (
-        e.altKey &&
-        !recording.isRecording &&
-        !recording.isConnecting &&
-        !recording.isProcessing &&
-        e.target instanceof HTMLElement &&
-        !["INPUT", "TEXTAREA"].includes(e.target.tagName)
-      ) {
-        e.preventDefault()
-        startRecording()
-      }
-    }
-
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (!e.altKey && recording.isRecording) {
-        stopRecording()
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown)
-    window.addEventListener("keyup", handleKeyUp)
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown)
-      window.removeEventListener("keyup", handleKeyUp)
-    }
-  }, [
-    recording.isRecording,
-    recording.isConnecting,
-    recording.isProcessing,
-    startRecording,
-    stopRecording,
-  ])
-
-  useEffect(() => {
-    return () => {
-      cleanupStream()
-      cleanupWebSocket()
-    }
-  }, [cleanupStream, cleanupWebSocket])
-
-  // Preload audio files on mount
-  useEffect(() => {
-    startSoundRef.current = new Audio(
-      "https://ui.elevenlabs.io/sounds/transcriber-start.mp3"
+const TranscriptCharacter = React.memo(
+  ({ char, delay }: { char: string; delay: number }) => {
+    return (
+      <motion.span
+        initial={{ filter: `blur(3.5px)`, opacity: 0 }}
+        animate={{ filter: `none`, opacity: 1 }}
+        transition={{ duration: 0.5, delay }}
+        style={{ willChange: delay > 0 ? "filter, opacity" : "auto" }}
+      >
+        {char}
+      </motion.span>
     )
-    endSoundRef.current = new Audio(
-      "https://ui.elevenlabs.io/sounds/transcriber-end.mp3"
-    )
-    errorSoundRef.current = new Audio(
-      "https://ui.elevenlabs.io/sounds/transcriber-error.mp3"
-    )
+  }
+)
+TranscriptCharacter.displayName = "TranscriptCharacter"
 
-    // Preload by setting volume and loading
-    ;[
-      startSoundRef.current,
-      endSoundRef.current,
-      errorSoundRef.current,
-    ].forEach((audio) => {
-      audio.volume = 0.6
-      audio.load()
-    })
-  }, [])
-
-  // Play start sound when recording begins
-  useEffect(() => {
-    if (recording.isRecording && !prevRecordingRef.current) {
-      startSoundRef.current?.play().catch(() => {
-        // Ignore play errors (e.g., user hasn't interacted with page yet)
-      })
-    }
-
-    // Play end sound when recording stops
-    if (!recording.isRecording && prevRecordingRef.current) {
-      endSoundRef.current?.play().catch(() => {
-        // Ignore play errors
-      })
-    }
-
-    prevRecordingRef.current = recording.isRecording
-  }, [recording.isRecording])
-
-  // Play error sound when error occurs
-  useEffect(() => {
-    if (recording.error && recording.error !== prevErrorRef.current) {
-      errorSoundRef.current?.play().catch(() => {
-        // Ignore play errors
-      })
-    }
-    prevErrorRef.current = recording.error
-  }, [recording.error])
-
-  const displayText =
-    recording.error || recording.partialTranscript || recording.transcript
-  const hasContent = Boolean(displayText)
-
-  return (
-    <div className="relative mx-auto flex h-full w-full max-w-4xl flex-col items-center justify-center">
-      {/* Bottom aura effect - Multi-layered prismatic glow */}
+// Memoize background effects to prevent re-renders
+const BackgroundAura = React.memo(
+  ({ status, isConnected }: { status: string; isConnected: boolean }) => {
+    return (
       <div
         className={cn(
           "pointer-events-none fixed inset-0 opacity-0 transition-opacity duration-700 ease-out",
-          recording.isConnecting && "opacity-40 duration-500 ease-in",
-          recording.isRecording && "opacity-100 duration-700 ease-in"
+          status === "connecting" && "opacity-40 duration-500 ease-in",
+          isConnected && "opacity-100 duration-700 ease-in"
         )}
       >
         {/* Center bottom pool - main glow */}
@@ -464,6 +134,456 @@ export default function RealtimeTranscriber01() {
           }}
         />
       </div>
+    )
+  }
+)
+BackgroundAura.displayName = "BackgroundAura"
+
+// Memoize bottom controls with comparison function
+const BottomControls = React.memo(
+  ({
+    isConnected,
+    hasError,
+    averageLatency,
+    isMac,
+    onStop,
+  }: {
+    isConnected: boolean
+    hasError: boolean
+    averageLatency: number
+    isMac: boolean
+    onStop: () => void
+  }) => {
+    return (
+      <AnimatePresence mode="popLayout">
+        {isConnected && !hasError && (
+          <motion.div
+            key="bottom-controls"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{
+              opacity: 1,
+              y: 0,
+              transition: { duration: 0.25, delay: 0.2 },
+            }}
+            exit={{
+              opacity: 0,
+              y: 20,
+              transition: { duration: 0.35 },
+            }}
+            className="fixed bottom-8 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2"
+          >
+            {/* Latency badge - always present, starts at 0 */}
+            <LatencyBadge averageLatency={averageLatency} />
+
+            {/* Stop button - always present */}
+            <button
+              onClick={onStop}
+              className="bg-foreground text-background border-foreground/10 inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium shadow-lg transition-opacity hover:opacity-90"
+            >
+              Stop
+              <kbd className="border-background/20 bg-background/10 inline-flex h-5 items-center rounded border px-1.5 font-mono text-xs">
+                {isMac ? "⌘K" : "Ctrl+K"}
+              </kbd>
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    )
+  },
+  (prev, next) => {
+    // Return true to SKIP re-render (props are equal)
+    // Return false to re-render (props changed)
+    if (prev.isConnected !== next.isConnected) return false
+    if (prev.hasError !== next.hasError) return false
+    if (prev.isMac !== next.isMac) return false
+
+    // Only update latency if it changes by more than 5ms
+    return Math.abs(prev.averageLatency - next.averageLatency) < 5
+  }
+)
+BottomControls.displayName = "BottomControls"
+
+// Separate latency badge to prevent icon re-renders
+const LatencyBadge = React.memo(
+  ({ averageLatency }: { averageLatency: number }) => {
+    return (
+      <div className="bg-foreground text-background border-foreground/10 inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium tabular-nums shadow-lg">
+        <GaugeCircleIcon className="h-4 w-4" />
+        {averageLatency} ms
+      </div>
+    )
+  },
+  (prev, next) => {
+    // Return true to SKIP re-render
+    // Only re-render if latency changes by 3ms or more
+    return Math.abs(prev.averageLatency - next.averageLatency) < 3
+  }
+)
+LatencyBadge.displayName = "LatencyBadge"
+
+export default function RealtimeTranscriber01() {
+  const [recording, setRecording] = useState<RecordingState>({
+    error: "",
+    latenciesMs: [],
+  })
+  const [selectedLanguage, setSelectedLanguage] = useState<string | null>(null)
+
+  // Detect platform for keyboard shortcut display
+  const [isMac, setIsMac] = useState(true)
+  useEffect(() => {
+    setIsMac(/(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent))
+  }, [])
+
+  const segmentStartMsRef = useRef<number | null>(null)
+  const lastTranscriptRef = useRef<string>("")
+
+  // Audio refs for sound effects
+  const startSoundRef = useRef<HTMLAudioElement | null>(null)
+  const endSoundRef = useRef<HTMLAudioElement | null>(null)
+  const errorSoundRef = useRef<HTMLAudioElement | null>(null)
+
+  // Guards to prevent race conditions
+  const isOperatingRef = useRef(false)
+  const shouldBeConnectedRef = useRef(false) // Tracks desired connection state
+  const errorTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Memoize callbacks to prevent useScribe from re-running
+  const onPartialTranscript = useCallback((data: { text?: string }) => {
+    const currentText = data.text || ""
+
+    // Skip if text hasn't changed (prevents re-renders on duplicate events)
+    if (currentText === lastTranscriptRef.current) {
+      return
+    }
+
+    lastTranscriptRef.current = currentText
+
+    // Record latency if we have a start time - mimics xi's recordLatency
+    if (currentText.length > 0 && segmentStartMsRef.current != null) {
+      const latency = performance.now() - segmentStartMsRef.current
+      console.log("[Scribe] Partial latency:", latency, "ms")
+      setRecording((prev) => ({
+        ...prev,
+        latenciesMs: [...prev.latenciesMs.slice(-29), latency],
+      }))
+      // Reset to null like xi does - next audio will set it again
+      segmentStartMsRef.current = null
+    }
+  }, [])
+
+  const onFinalTranscript = useCallback((data: { text?: string }) => {
+    // Reset last transcript on final
+    lastTranscriptRef.current = ""
+
+    // Record latency if we have a start time - mimics xi's recordLatency
+    if (
+      data.text &&
+      data.text.length > 0 &&
+      segmentStartMsRef.current != null
+    ) {
+      const latency = performance.now() - segmentStartMsRef.current
+      console.log("[Scribe] Final latency:", latency, "ms")
+      setRecording((prev) => ({
+        ...prev,
+        latenciesMs: [...prev.latenciesMs.slice(-29), latency],
+      }))
+    }
+    // Reset to null like xi does
+    segmentStartMsRef.current = null
+  }, [])
+
+  const onError = useCallback((error: Error | Event) => {
+    console.error("[Scribe] Error:", error)
+    const errorMessage =
+      error instanceof Error ? error.message : "Transcription error"
+
+    // Clear any existing error timeout
+    if (errorTimeoutRef.current) {
+      clearTimeout(errorTimeoutRef.current)
+    }
+
+    // Only show errors that persist for more than 500ms (debounce transient errors)
+    errorTimeoutRef.current = setTimeout(() => {
+      setRecording((prev) => ({
+        ...prev,
+        error: errorMessage,
+      }))
+      // Play error sound
+      errorSoundRef.current?.play().catch(() => {})
+    }, 500)
+  }, [])
+
+  // Memoize the configuration object to prevent useScribe from re-initializing
+  const scribeConfig = useMemo(
+    () => ({
+      modelId: "scribe_realtime_v2" as const,
+      onPartialTranscript,
+      onFinalTranscript,
+      onError,
+    }),
+    [onPartialTranscript, onFinalTranscript, onError]
+  )
+
+  const scribe = useScribe(scribeConfig)
+
+  // Simulate audio chunk timing - set timer when likely sending audio
+  useEffect(() => {
+    if (!scribe.isConnected) return
+
+    // While connected, continuously set timer to simulate audio chunks being sent
+    // This approximates xi's sendAudioChunk behavior
+    const interval = setInterval(() => {
+      // Only set if null (like xi does: if (this.segmentStartMs == null))
+      if (segmentStartMsRef.current === null) {
+        segmentStartMsRef.current = performance.now()
+        console.log("[Scribe] Timer set (simulating audio chunk)")
+      }
+    }, 100) // Check every 100ms (audio chunks are typically sent frequently)
+
+    return () => clearInterval(interval)
+  }, [scribe.isConnected])
+
+  const handleToggleRecording = useCallback(async () => {
+    // Handle disconnect request
+    if (scribe.isConnected || scribe.status === "connecting") {
+      console.log("[Scribe] Disconnect requested")
+      shouldBeConnectedRef.current = false
+      isOperatingRef.current = true // Prevent re-entry during disconnect
+
+      // Clear any pending error timeouts
+      if (errorTimeoutRef.current) {
+        clearTimeout(errorTimeoutRef.current)
+        errorTimeoutRef.current = null
+      }
+
+      // Disconnect immediately
+      console.log("[Scribe] Disconnecting...")
+      scribe.disconnect()
+      scribe.clearTranscripts()
+      segmentStartMsRef.current = null
+      setRecording((prev) => ({ ...prev, latenciesMs: [], error: "" }))
+
+      // Play end sound (reset first for reliability)
+      if (endSoundRef.current) {
+        endSoundRef.current.currentTime = 0
+        endSoundRef.current.play().catch(() => {})
+      }
+
+      // Reset operating flag after a short delay
+      setTimeout(() => {
+        isOperatingRef.current = false
+      }, 300)
+      return
+    }
+
+    // Prevent multiple simultaneous connect operations
+    if (isOperatingRef.current) {
+      console.log("[Scribe] Operation already in progress, ignoring")
+      return
+    }
+
+    shouldBeConnectedRef.current = true
+    isOperatingRef.current = true
+
+    try {
+      console.log("[Scribe] Fetching token...")
+
+      // Clear any pending error timeouts
+      if (errorTimeoutRef.current) {
+        clearTimeout(errorTimeoutRef.current)
+        errorTimeoutRef.current = null
+      }
+      setRecording((prev) => ({ ...prev, error: "", latenciesMs: [] }))
+      segmentStartMsRef.current = null
+
+      const result = await getScribeToken()
+
+      // Check if user still wants to connect after token fetch
+      if (!shouldBeConnectedRef.current) {
+        console.log("[Scribe] User cancelled during token fetch")
+        return
+      }
+
+      if (result.error || !result.token) {
+        throw new Error(result.error || "Failed to get token")
+      }
+
+      console.log("[Scribe] Connecting...")
+      await scribe.connect({
+        token: result.token,
+        languageCode: selectedLanguage || undefined,
+        microphone: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: true,
+        },
+      })
+
+      console.log("[Scribe] Connected successfully")
+
+      // Check if user still wants to be connected
+      if (!shouldBeConnectedRef.current) {
+        console.log(
+          "[Scribe] User cancelled during connection, disconnecting..."
+        )
+        scribe.disconnect()
+        scribe.clearTranscripts()
+        segmentStartMsRef.current = null
+        setRecording((prev) => ({ ...prev, latenciesMs: [], error: "" }))
+        if (endSoundRef.current) {
+          endSoundRef.current.currentTime = 0
+          endSoundRef.current.play().catch(() => {})
+        }
+        return
+      }
+
+      // Play start sound with a small delay for reliability
+      setTimeout(() => {
+        if (
+          shouldBeConnectedRef.current &&
+          scribe.isConnected &&
+          startSoundRef.current
+        ) {
+          console.log("[Scribe] Playing start sound")
+          startSoundRef.current.currentTime = 0
+          startSoundRef.current
+            .play()
+            .then(() => console.log("[Scribe] Start sound played"))
+            .catch((err) => console.error("[Scribe] Start sound failed:", err))
+        } else {
+          console.log("[Scribe] Start sound conditions not met:", {
+            shouldBeConnected: shouldBeConnectedRef.current,
+            isConnected: scribe.isConnected,
+            hasAudio: !!startSoundRef.current,
+          })
+        }
+      }, 50)
+    } catch (error) {
+      console.error("[Scribe] Connection error:", error)
+      shouldBeConnectedRef.current = false
+      setRecording((prev) => ({
+        ...prev,
+        error:
+          error instanceof Error ? error.message : "Failed to start recording",
+      }))
+    } finally {
+      isOperatingRef.current = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    scribe.connect,
+    scribe.disconnect,
+    scribe.clearTranscripts,
+    scribe.isConnected,
+    scribe.status,
+    selectedLanguage,
+  ])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd+K (Mac) or Ctrl+K (Windows/Linux) to toggle recording
+      if (
+        e.key === "k" &&
+        (e.metaKey || e.ctrlKey) &&
+        e.target instanceof HTMLElement &&
+        !["INPUT", "TEXTAREA"].includes(e.target.tagName)
+      ) {
+        e.preventDefault()
+        handleToggleRecording()
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown)
+    }
+  }, [handleToggleRecording])
+
+  // Preload audio files on mount
+  useEffect(() => {
+    const sounds = [
+      {
+        ref: startSoundRef,
+        url: "https://ui.elevenlabs.io/sounds/transcriber-start.mp3",
+      },
+      {
+        ref: endSoundRef,
+        url: "https://ui.elevenlabs.io/sounds/transcriber-end.mp3",
+      },
+      {
+        ref: errorSoundRef,
+        url: "https://ui.elevenlabs.io/sounds/transcriber-error.mp3",
+      },
+    ]
+
+    // Preload all sounds and ensure they're ready to play
+    sounds.forEach(({ ref, url }) => {
+      const audio = new Audio(url)
+      audio.volume = 0.6
+      audio.preload = "auto"
+
+      // Force load the audio
+      audio.load()
+
+      // Play silently once to "unlock" audio playback (browser requirement)
+      const unlockAudio = () => {
+        audio
+          .play()
+          .then(() => {
+            audio.pause()
+            audio.currentTime = 0
+          })
+          .catch(() => {
+            // Autoplay blocked, will work after user interaction
+          })
+      }
+
+      // Try to unlock audio on first interaction
+      if (audio.readyState >= 2) {
+        unlockAudio()
+      } else {
+        audio.addEventListener("canplaythrough", unlockAudio, { once: true })
+      }
+
+      ref.current = audio
+    })
+  }, [])
+
+  const fullTranscript = useMemo(
+    () => scribe.finalTranscripts.map((t) => t.text).join(" "),
+    [scribe.finalTranscripts]
+  )
+
+  // Create a stable displayText that only changes when actual text changes
+  const displayText = useMemo(() => {
+    const text = recording.error || scribe.partialTranscript || fullTranscript
+    return text
+  }, [recording.error, scribe.partialTranscript, fullTranscript])
+
+  // Use a ref for previous displayText to avoid unnecessary re-renders
+  const prevDisplayTextRef = useRef(displayText)
+  const stableDisplayText = useMemo(() => {
+    if (displayText !== prevDisplayTextRef.current) {
+      prevDisplayTextRef.current = displayText
+    }
+    return prevDisplayTextRef.current
+  }, [displayText])
+
+  const hasContent = Boolean(stableDisplayText)
+
+  // Memoize average latency calculation
+  const averageLatency = useMemo(() => {
+    if (recording.latenciesMs.length === 0) return 0
+    return Math.round(
+      recording.latenciesMs.reduce((sum, v) => sum + v, 0) /
+        recording.latenciesMs.length
+    )
+  }, [recording.latenciesMs])
+
+  return (
+    <div className="relative mx-auto flex h-full w-full max-w-4xl flex-col items-center justify-center">
+      {/* Bottom aura effect - Multi-layered prismatic glow */}
+      <BackgroundAura status={scribe.status} isConnected={scribe.isConnected} />
 
       <style jsx>{`
         @keyframes shimmer {
@@ -497,25 +617,26 @@ export default function RealtimeTranscriber01() {
         }
       `}</style>
 
-      <div className="relative flex h-full w-full flex-col items-center justify-center gap-8 px-8 py-12">
+      <div className="relative flex h-full w-full flex-col items-center justify-center gap-8 overflow-hidden px-8 py-12">
         {/* Main transcript area */}
-        <div className="flex min-h-[350px] w-full flex-1 items-center justify-center">
+        <div className="relative flex min-h-[350px] w-full flex-1 items-center justify-center overflow-hidden">
           {hasContent && (
             <TranscriberTranscript
-              transcript={displayText}
+              transcript={stableDisplayText}
               error={recording.error}
-              isPartial={Boolean(recording.partialTranscript)}
+              isPartial={Boolean(scribe.partialTranscript)}
+              isConnected={scribe.isConnected}
             />
           )}
 
           {!hasContent && (
-            <div className="flex flex-col items-center gap-8">
-              {/* Main instruction text - transitions smoothly between states */}
-              <div className="relative flex min-h-[48px] min-w-[500px] items-center justify-center">
+            <div className="flex max-h-full w-full max-w-sm flex-col items-center gap-8 overflow-y-auto">
+              {/* Status text - transitions smoothly between states */}
+              <div className="relative flex min-h-[48px] w-full items-center justify-center">
                 <div
                   className={cn(
                     "absolute inset-0 flex items-center justify-center transition-opacity duration-500",
-                    recording.isConnecting
+                    scribe.status === "connecting"
                       ? "opacity-100"
                       : "pointer-events-none opacity-0"
                   )}
@@ -528,98 +649,152 @@ export default function RealtimeTranscriber01() {
                 <div
                   className={cn(
                     "absolute inset-0 flex items-center justify-center transition-opacity duration-500",
-                    recording.isRecording
+                    scribe.isConnected
                       ? "opacity-100"
                       : "pointer-events-none opacity-0"
                   )}
                 >
                   <ShimmeringText
-                    text="Start talking"
+                    text="Say something aloud..."
                     className="text-3xl font-light tracking-wide whitespace-nowrap"
                   />
                 </div>
-                <div
-                  className={cn(
-                    "absolute inset-0 flex items-center justify-center transition-opacity duration-500",
-                    !recording.isConnecting && !recording.isRecording && !recording.isProcessing
-                      ? "opacity-100"
-                      : "pointer-events-none opacity-0"
-                  )}
-                >
-                  <div className="flex items-center gap-3">
-                    <span className="text-foreground text-2xl font-light tracking-wide whitespace-nowrap">
-                      Press and hold
-                    </span>
-                    <kbd className="border-border inline-flex h-8 items-center rounded-md border bg-muted/50 px-3 font-mono text-base font-medium shadow-sm select-none">
-                      <ShimmeringText text="⌥ Option" className="text-base" />
-                    </kbd>
-                  </div>
-                </div>
               </div>
 
-              {/* Secondary text - always present but fades out */}
-              <p
+              {/* Language selector and button */}
+              <div
                 className={cn(
-                  "text-muted-foreground text-center text-sm font-light transition-opacity duration-500",
-                  recording.isConnecting || recording.isRecording || recording.isProcessing
-                    ? "opacity-0"
-                    : "opacity-100"
+                  "flex w-full flex-col gap-4 transition-opacity duration-500",
+                  !scribe.isConnected && scribe.status !== "connecting"
+                    ? "opacity-100"
+                    : "pointer-events-none opacity-0"
                 )}
               >
-                Release when finished
-              </p>
+                <div className="space-y-2">
+                  <label className="text-foreground/70 text-sm font-medium">
+                    Language
+                  </label>
+                  <LanguageSelector
+                    value={selectedLanguage}
+                    onValueChange={setSelectedLanguage}
+                    disabled={
+                      scribe.isConnected || scribe.status === "connecting"
+                    }
+                  />
+                </div>
+                <Button
+                  onClick={handleToggleRecording}
+                  disabled={isOperatingRef.current}
+                  size="lg"
+                  className="bg-foreground/95 hover:bg-foreground/90 w-full justify-center gap-3"
+                >
+                  <span>Start Transcribing</span>
+                  <kbd className="border-background/20 bg-background/10 hidden h-5 items-center gap-1 rounded border px-1.5 font-mono text-xs sm:inline-flex">
+                    {isMac ? "⌘K" : "Ctrl+K"}
+                  </kbd>
+                </Button>
+              </div>
             </div>
           )}
         </div>
+
+        {/* Bottom controls - latency badge and stop button */}
+        <BottomControls
+          isConnected={scribe.isConnected}
+          hasError={Boolean(recording.error)}
+          averageLatency={averageLatency}
+          isMac={isMac}
+          onStop={handleToggleRecording}
+        />
       </div>
     </div>
   )
 }
 
-const TranscriberTranscript = ({
-  transcript,
-  error,
-  isPartial,
-}: {
-  transcript: string
-  error: string
-  isPartial?: boolean
-}) => {
-  return (
-    <div className="animate-in fade-in slide-in-from-bottom-8 relative w-full duration-700">
-      <ScrollArea className="max-h-[450px] w-full">
-        <div
-          className={cn(
-            "text-foreground/90 px-12 py-8 text-center text-xl leading-relaxed font-light",
-            error && "text-red-500",
-            isPartial && "text-foreground/60"
-          )}
-        >
-          <Streamdown>{transcript}</Streamdown>
-        </div>
-      </ScrollArea>
-      {transcript && !error && !isPartial && (
-        <Button
-          variant="ghost"
-          size="icon"
-          className="absolute top-4 right-4 h-8 w-8 opacity-0 transition-opacity hover:opacity-60"
-          onClick={() => {
-            navigator.clipboard.writeText(transcript)
-          }}
-          aria-label="Copy transcript"
-        >
-          <Copy className="h-4 w-4" />
-        </Button>
-      )}
-    </div>
-  )
-}
+const TranscriberTranscript = React.memo(
+  ({
+    transcript,
+    error,
+    isPartial,
+    isConnected,
+  }: {
+    transcript: string
+    error: string
+    isPartial?: boolean
+    isConnected: boolean
+  }) => {
+    const characters = useMemo(() => transcript.split(""), [transcript])
+    const previousNumChars = useDebounce(
+      usePrevious(characters.length) || 0,
+      100
+    )
+    const scrollRef = useRef<HTMLDivElement>(null)
+    const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
-const AUDIO_CONSTRAINTS: MediaStreamConstraints = {
-  audio: {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
-    channelCount: 1,
-  },
-}
+    // Auto-scroll to bottom when connected and text is updating
+    // Throttled to avoid excessive scroll updates
+    useEffect(() => {
+      if (isConnected && scrollRef.current) {
+        if (scrollTimeoutRef.current) {
+          clearTimeout(scrollTimeoutRef.current)
+        }
+        scrollTimeoutRef.current = setTimeout(() => {
+          if (scrollRef.current) {
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+          }
+        }, 50) // Throttle scroll updates to 50ms
+      }
+      return () => {
+        if (scrollTimeoutRef.current) {
+          clearTimeout(scrollTimeoutRef.current)
+        }
+      }
+    }, [transcript, isConnected])
+
+    return (
+      <div className="absolute inset-0 flex flex-col">
+        <div ref={scrollRef} className="flex-1 overflow-auto">
+          <div
+            className={cn(
+              "min-h-[50%] w-full px-12 py-8",
+              isConnected && "absolute bottom-16"
+            )}
+          >
+            <div
+              className={cn(
+                "text-foreground/90 w-full text-xl leading-relaxed font-light",
+                error && "text-red-500",
+                isPartial && "text-foreground/60"
+              )}
+            >
+              {characters.map((char, index) => {
+                // Only animate new characters (those after previousNumChars)
+                const delay =
+                  index >= previousNumChars
+                    ? (index - previousNumChars + 1) * 0.012
+                    : 0
+                return (
+                  <TranscriptCharacter key={index} char={char} delay={delay} />
+                )
+              })}
+            </div>
+          </div>
+        </div>
+        {transcript && !error && !isPartial && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="absolute top-4 right-4 h-8 w-8 opacity-0 transition-opacity hover:opacity-60"
+            onClick={() => {
+              navigator.clipboard.writeText(transcript)
+            }}
+            aria-label="Copy transcript"
+          >
+            <Copy className="h-4 w-4" />
+          </Button>
+        )}
+      </div>
+    )
+  }
+)
+TranscriberTranscript.displayName = "TranscriberTranscript"
