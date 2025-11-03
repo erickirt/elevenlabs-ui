@@ -141,6 +141,14 @@ function VoicePickerItem({
   return (
     <CommandItem
       value={voice.voiceId!}
+      keywords={[
+        voice.name,
+        voice.labels?.accent,
+        voice.labels?.gender,
+        voice.labels?.age,
+        voice.labels?.description,
+        voice.labels?.["use case"],
+      ].filter((k): k is string => Boolean(k))}
       onSelect={onSelect}
       className="flex items-center gap-3"
     >
