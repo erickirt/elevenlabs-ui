@@ -1,13 +1,15 @@
 "use client"
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import Link from "next/link"
 import { useScribe } from "@elevenlabs/react"
 import { AnimatePresence, motion } from "framer-motion"
-import { Copy, GaugeCircleIcon } from "lucide-react"
+import { Copy } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import { useDebounce } from "@/registry/elevenlabs-ui/hooks/use-debounce"
 import { usePrevious } from "@/registry/elevenlabs-ui/hooks/use-previous"
+import { Badge } from "@/registry/elevenlabs-ui/ui/badge"
 import { Button } from "@/registry/elevenlabs-ui/ui/button"
 import { ShimmeringText } from "@/registry/elevenlabs-ui/ui/shimmering-text"
 
@@ -144,13 +146,11 @@ const BottomControls = React.memo(
   ({
     isConnected,
     hasError,
-    averageLatency,
     isMac,
     onStop,
   }: {
     isConnected: boolean
     hasError: boolean
-    averageLatency: number
     isMac: boolean
     onStop: () => void
   }) => {
@@ -172,9 +172,6 @@ const BottomControls = React.memo(
             }}
             className="fixed bottom-8 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2"
           >
-            {/* Latency badge - always present, starts at 0 */}
-            <LatencyBadge averageLatency={averageLatency} />
-
             {/* Stop button - always present */}
             <button
               onClick={onStop}
@@ -196,30 +193,10 @@ const BottomControls = React.memo(
     if (prev.isConnected !== next.isConnected) return false
     if (prev.hasError !== next.hasError) return false
     if (prev.isMac !== next.isMac) return false
-
-    // Only update latency if it changes by more than 5ms
-    return Math.abs(prev.averageLatency - next.averageLatency) < 5
+    return true
   }
 )
 BottomControls.displayName = "BottomControls"
-
-// Separate latency badge to prevent icon re-renders
-const LatencyBadge = React.memo(
-  ({ averageLatency }: { averageLatency: number }) => {
-    return (
-      <div className="bg-foreground text-background border-foreground/10 inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium tabular-nums shadow-lg">
-        <GaugeCircleIcon className="h-4 w-4" />
-        {averageLatency} ms
-      </div>
-    )
-  },
-  (prev, next) => {
-    // Return true to SKIP re-render
-    // Only re-render if latency changes by 3ms or more
-    return Math.abs(prev.averageLatency - next.averageLatency) < 3
-  }
-)
-LatencyBadge.displayName = "LatencyBadge"
 
 export default function RealtimeTranscriber01() {
   const [recording, setRecording] = useState<RecordingState>({
@@ -227,6 +204,7 @@ export default function RealtimeTranscriber01() {
     latenciesMs: [],
   })
   const [selectedLanguage, setSelectedLanguage] = useState<string | null>(null)
+  const [isOperating, setIsOperating] = useState(false)
 
   // Detect platform for keyboard shortcut display
   const [isMac, setIsMac] = useState(true)
@@ -243,7 +221,6 @@ export default function RealtimeTranscriber01() {
   const errorSoundRef = useRef<HTMLAudioElement | null>(null)
 
   // Guards to prevent race conditions
-  const isOperatingRef = useRef(false)
   const shouldBeConnectedRef = useRef(false) // Tracks desired connection state
   const errorTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
@@ -348,7 +325,7 @@ export default function RealtimeTranscriber01() {
     if (scribe.isConnected || scribe.status === "connecting") {
       console.log("[Scribe] Disconnect requested")
       shouldBeConnectedRef.current = false
-      isOperatingRef.current = true // Prevent re-entry during disconnect
+      setIsOperating(true) // Prevent re-entry during disconnect
 
       // Clear any pending error timeouts
       if (errorTimeoutRef.current) {
@@ -371,19 +348,19 @@ export default function RealtimeTranscriber01() {
 
       // Reset operating flag after a short delay
       setTimeout(() => {
-        isOperatingRef.current = false
+        setIsOperating(false)
       }, 300)
       return
     }
 
     // Prevent multiple simultaneous connect operations
-    if (isOperatingRef.current) {
+    if (isOperating) {
       console.log("[Scribe] Operation already in progress, ignoring")
       return
     }
 
     shouldBeConnectedRef.current = true
-    isOperatingRef.current = true
+    setIsOperating(true)
 
     try {
       console.log("[Scribe] Fetching token...")
@@ -467,10 +444,11 @@ export default function RealtimeTranscriber01() {
           error instanceof Error ? error.message : "Failed to start recording",
       }))
     } finally {
-      isOperatingRef.current = false
+      setIsOperating(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    isOperating,
     scribe.connect,
     scribe.disconnect,
     scribe.clearTranscripts,
@@ -550,7 +528,8 @@ export default function RealtimeTranscriber01() {
   }, [])
 
   const fullTranscript = useMemo(
-    () => scribe.finalTranscripts.map((t) => t.text).join(" "),
+    () =>
+      scribe.finalTranscripts.map((t: { text: string }) => t.text).join(" "),
     [scribe.finalTranscripts]
   )
 
@@ -570,15 +549,6 @@ export default function RealtimeTranscriber01() {
   }, [displayText])
 
   const hasContent = Boolean(stableDisplayText)
-
-  // Memoize average latency calculation
-  const averageLatency = useMemo(() => {
-    if (recording.latenciesMs.length === 0) return 0
-    return Math.round(
-      recording.latenciesMs.reduce((sum, v) => sum + v, 0) /
-        recording.latenciesMs.length
-    )
-  }, [recording.latenciesMs])
 
   return (
     <div className="relative mx-auto flex h-full w-full max-w-4xl flex-col items-center justify-center">
@@ -670,39 +640,61 @@ export default function RealtimeTranscriber01() {
                     : "pointer-events-none opacity-0"
                 )}
               >
-                <div className="space-y-2">
-                  <label className="text-foreground/70 text-sm font-medium">
-                    Language
-                  </label>
-                  <LanguageSelector
-                    value={selectedLanguage}
-                    onValueChange={setSelectedLanguage}
-                    disabled={
-                      scribe.isConnected || scribe.status === "connecting"
-                    }
-                  />
+                <div className="flex flex-col items-center gap-6">
+                  <div className="flex flex-col items-center gap-2 text-center">
+                    <h1 className="text-2xl font-semibold tracking-tight">
+                      Realtime Speech to Text
+                    </h1>
+                    <p className="text-muted-foreground text-sm">
+                      Transcribe your voice in real-time with high accuracy
+                    </p>
+                  </div>
+
+                  <div className="w-full space-y-2">
+                    <label className="text-foreground/70 text-sm font-medium">
+                      Language
+                    </label>
+                    <LanguageSelector
+                      value={selectedLanguage}
+                      onValueChange={setSelectedLanguage}
+                      disabled={
+                        scribe.isConnected || scribe.status === "connecting"
+                      }
+                    />
+                  </div>
+
+                  <Button
+                    onClick={handleToggleRecording}
+                    disabled={isOperating}
+                    size="lg"
+                    className="bg-foreground/95 hover:bg-foreground/90 w-full justify-center gap-3"
+                  >
+                    <span>Start Transcribing</span>
+                    <kbd className="border-background/20 bg-background/10 hidden h-5 items-center gap-1 rounded border px-1.5 font-mono text-xs sm:inline-flex">
+                      {isMac ? "⌘K" : "Ctrl+K"}
+                    </kbd>
+                  </Button>
+
+                  <Badge variant="outline" asChild>
+                    <Link
+                      href="https://elevenlabs.io/speech-to-text"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-foreground/60 hover:text-foreground/80 transition-colors"
+                    >
+                      Powered by ElevenLabs Speech to Text
+                    </Link>
+                  </Badge>
                 </div>
-                <Button
-                  onClick={handleToggleRecording}
-                  disabled={isOperatingRef.current}
-                  size="lg"
-                  className="bg-foreground/95 hover:bg-foreground/90 w-full justify-center gap-3"
-                >
-                  <span>Start Transcribing</span>
-                  <kbd className="border-background/20 bg-background/10 hidden h-5 items-center gap-1 rounded border px-1.5 font-mono text-xs sm:inline-flex">
-                    {isMac ? "⌘K" : "Ctrl+K"}
-                  </kbd>
-                </Button>
               </div>
             </div>
           )}
         </div>
 
-        {/* Bottom controls - latency badge and stop button */}
+        {/* Bottom controls - stop button */}
         <BottomControls
           isConnected={scribe.isConnected}
           hasError={Boolean(recording.error)}
-          averageLatency={averageLatency}
           isMac={isMac}
           onStop={handleToggleRecording}
         />

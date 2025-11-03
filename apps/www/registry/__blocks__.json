@@ -12,7 +12,7 @@
   {
     "name": "realtime-transcriber-01",
     "description": "Scribe V2 Realtime Transcriber",
-    "categories": ["audio"]
+    "categories": ["audio-beta"]
   },
   {
     "name": "voice-chat-01",

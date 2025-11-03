@@ -340,10 +340,11 @@
       "type": "registry:block",
       "description": "Scribe V2 Realtime Transcriber",
       "dependencies": [
-        "streamdown"
+        "@elevenlabs/react",
+        "framer-motion"
       ],
       "registryDependencies": [
-        "https://ui.elevenlabs.io/r/voice-button.json",
+        "badge",
         "button",
         "scroll-area",
         "https://ui.elevenlabs.io/r/shimmering-text.json"
@@ -353,6 +354,16 @@
           "path": "registry/elevenlabs-ui/blocks/realtime-transcriber-01/page.tsx",
           "type": "registry:page",
           "target": "app/realtime-transcriber-01/page.tsx"
+        },
+        {
+          "path": "registry/elevenlabs-ui/blocks/realtime-transcriber-01/actions/get-scribe-token.ts",
+          "type": "registry:file",
+          "target": "app/realtime-transcriber-01/actions/get-scribe-token.ts"
+        },
+        {
+          "path": "registry/elevenlabs-ui/blocks/realtime-transcriber-01/components/language-selector.tsx",
+          "type": "registry:component",
+          "target": "components/language-selector.tsx"
         }
       ],
       "meta": {
@@ -361,7 +372,7 @@
         "mobile": "component"
       },
       "categories": [
-        "audio"
+        "audio-beta"
       ]
     },
     {

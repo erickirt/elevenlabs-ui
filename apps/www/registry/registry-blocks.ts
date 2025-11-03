@@ -69,17 +69,27 @@ export const blocks: Registry["items"] = [
     description: "Scribe V2 Realtime Transcriber",
     type: "registry:block",
     registryDependencies: [
-      "https://ui.elevenlabs.io/r/voice-button.json",
+      "badge",
       "button",
       "scroll-area",
       "https://ui.elevenlabs.io/r/shimmering-text.json",
     ],
-    dependencies: ["streamdown"],
+    dependencies: ["@elevenlabs/react", "framer-motion"],
     files: [
       {
         path: "blocks/realtime-transcriber-01/page.tsx",
         type: "registry:page",
         target: "app/realtime-transcriber-01/page.tsx",
+      },
+      {
+        path: "blocks/realtime-transcriber-01/actions/get-scribe-token.ts",
+        type: "registry:file",
+        target: "app/realtime-transcriber-01/actions/get-scribe-token.ts",
+      },
+      {
+        path: "blocks/realtime-transcriber-01/components/language-selector.tsx",
+        type: "registry:component",
+        target: "components/language-selector.tsx",
       },
     ],
     meta: {
@@ -88,7 +98,7 @@ export const blocks: Registry["items"] = [
         "w-full bg-surface min-h-svh flex px-4 py-12 items-center md:py-20 justify-center min-w-0",
       mobile: "component",
     },
-    categories: ["audio"],
+    categories: ["audio-beta"],
   },
   {
     name: "voice-chat-01",
