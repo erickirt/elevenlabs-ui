@@ -1,14 +1,14 @@
 "use client"
 
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Hls from "hls.js"
 import { Volume, Volume1, Volume2, VolumeX } from "lucide-react"
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { cn } from "@/registry/elevenlabs-ui/lib/utils"
 import {
-    AudioPlayerButton,
-    AudioPlayerProvider,
-    useAudioPlayer,
+  AudioPlayerButton,
+  AudioPlayerProvider,
+  useAudioPlayer,
 } from "@/registry/elevenlabs-ui/ui/audio-player"
 import { Card } from "@/registry/elevenlabs-ui/ui/card"
 import { Orb } from "@/registry/elevenlabs-ui/ui/orb"
