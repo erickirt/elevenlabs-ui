@@ -764,7 +764,7 @@ const TranscriberTranscript = React.memo(
               className={cn(
                 "text-foreground/90 w-full text-xl leading-relaxed font-light",
                 error && "text-red-500",
-                isPartial && "text-foreground/60"
+                isPartial && !error && "text-foreground/60"
               )}
             >
               {characters.map((char, index) => {
