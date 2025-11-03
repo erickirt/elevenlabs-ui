@@ -21,6 +21,8 @@ interface RecordingState {
   latenciesMs: number[]
 }
 
+type ConnectionState = "idle" | "connecting" | "connected" | "disconnecting"
+
 const TranscriptCharacter = React.memo(
   ({ char, delay }: { char: string; delay: number }) => {
     return (
@@ -40,12 +42,13 @@ TranscriptCharacter.displayName = "TranscriptCharacter"
 // Memoize background effects to prevent re-renders
 const BackgroundAura = React.memo(
   ({ status, isConnected }: { status: string; isConnected: boolean }) => {
+    const isActive = status === "connecting" || isConnected
+
     return (
       <div
         className={cn(
-          "pointer-events-none fixed inset-0 opacity-0 transition-opacity duration-700 ease-out",
-          status === "connecting" && "opacity-40 duration-500 ease-in",
-          isConnected && "opacity-100 duration-700 ease-in"
+          "pointer-events-none fixed inset-0 transition-opacity duration-300 ease-out",
+          isActive ? "opacity-100" : "opacity-0"
         )}
       >
         {/* Center bottom pool - main glow */}
@@ -62,7 +65,10 @@ const BackgroundAura = React.memo(
 
         {/* Pulsing layer */}
         <div
-          className="absolute bottom-0 left-1/2 -translate-x-1/2 animate-pulse"
+          className={cn(
+            "absolute bottom-0 left-1/2 -translate-x-1/2 animate-pulse",
+            isConnected ? "opacity-100" : "opacity-80"
+          )}
           style={{
             width: "100%",
             height: "18vh",
@@ -159,20 +165,19 @@ const BottomControls = React.memo(
         {isConnected && !hasError && (
           <motion.div
             key="bottom-controls"
-            initial={{ opacity: 0, y: 20 }}
+            initial={{ opacity: 0, y: 10 }}
             animate={{
               opacity: 1,
               y: 0,
-              transition: { duration: 0.25, delay: 0.2 },
+              transition: { duration: 0.1 },
             }}
             exit={{
               opacity: 0,
-              y: 20,
-              transition: { duration: 0.35 },
+              y: 10,
+              transition: { duration: 0.1 },
             }}
             className="fixed bottom-8 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2"
           >
-            {/* Stop button - always present */}
             <button
               onClick={onStop}
               className="bg-foreground text-background border-foreground/10 inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium shadow-lg transition-opacity hover:opacity-90"
@@ -188,8 +193,6 @@ const BottomControls = React.memo(
     )
   },
   (prev, next) => {
-    // Return true to SKIP re-render (props are equal)
-    // Return false to re-render (props changed)
     if (prev.isConnected !== next.isConnected) return false
     if (prev.hasError !== next.hasError) return false
     if (prev.isMac !== next.isMac) return false
@@ -204,9 +207,10 @@ export default function RealtimeTranscriber01() {
     latenciesMs: [],
   })
   const [selectedLanguage, setSelectedLanguage] = useState<string | null>(null)
-  const [isOperating, setIsOperating] = useState(false)
+  const [connectionState, setConnectionStateState] =
+    useState<ConnectionState>("idle")
+  const [localTranscript, setLocalTranscript] = useState("")
 
-  // Detect platform for keyboard shortcut display
   const [isMac, setIsMac] = useState(true)
   useEffect(() => {
     setIsMac(/(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent))
@@ -214,83 +218,117 @@ export default function RealtimeTranscriber01() {
 
   const segmentStartMsRef = useRef<number | null>(null)
   const lastTranscriptRef = useRef<string>("")
+  const finalTranscriptsRef = useRef<string[]>([])
 
-  // Audio refs for sound effects
   const startSoundRef = useRef<HTMLAudioElement | null>(null)
   const endSoundRef = useRef<HTMLAudioElement | null>(null)
   const errorSoundRef = useRef<HTMLAudioElement | null>(null)
 
-  // Guards to prevent race conditions
-  const shouldBeConnectedRef = useRef(false) // Tracks desired connection state
   const errorTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const lastOperationTimeRef = useRef(0)
+  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const connectionStateRef = useRef<ConnectionState>("idle")
 
-  // Memoize callbacks to prevent useScribe from re-running
+  const updateConnectionState = useCallback(
+    (next: ConnectionState) => {
+      connectionStateRef.current = next
+      setConnectionStateState(next)
+    },
+    [setConnectionStateState]
+  )
+
+  const clearSessionRefs = useCallback(() => {
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current)
+      timerIntervalRef.current = null
+    }
+    if (errorTimeoutRef.current) {
+      clearTimeout(errorTimeoutRef.current)
+      errorTimeoutRef.current = null
+    }
+
+    segmentStartMsRef.current = null
+    lastTranscriptRef.current = ""
+    finalTranscriptsRef.current = []
+  }, [])
+
+  // === Callbacks for Scribe ===
   const onPartialTranscript = useCallback((data: { text?: string }) => {
+    // Only process if we're connected
+    if (connectionStateRef.current !== "connected") return
+
     const currentText = data.text || ""
 
-    // Skip if text hasn't changed (prevents re-renders on duplicate events)
-    if (currentText === lastTranscriptRef.current) {
-      return
-    }
+    if (currentText === lastTranscriptRef.current) return
 
     lastTranscriptRef.current = currentText
 
-    // Record latency if we have a start time - mimics xi's recordLatency
+    // Update local transcript with partial
+    const fullText = finalTranscriptsRef.current.join(" ")
+    const combined = fullText ? `${fullText} ${currentText}` : currentText
+    setLocalTranscript(combined)
+
     if (currentText.length > 0 && segmentStartMsRef.current != null) {
       const latency = performance.now() - segmentStartMsRef.current
-      console.log("[Scribe] Partial latency:", latency, "ms")
       setRecording((prev) => ({
         ...prev,
         latenciesMs: [...prev.latenciesMs.slice(-29), latency],
       }))
-      // Reset to null like xi does - next audio will set it again
       segmentStartMsRef.current = null
     }
   }, [])
 
   const onFinalTranscript = useCallback((data: { text?: string }) => {
-    // Reset last transcript on final
+    // Only process if we're connected
+    if (connectionStateRef.current !== "connected") return
+
     lastTranscriptRef.current = ""
 
-    // Record latency if we have a start time - mimics xi's recordLatency
-    if (
-      data.text &&
-      data.text.length > 0 &&
-      segmentStartMsRef.current != null
-    ) {
-      const latency = performance.now() - segmentStartMsRef.current
-      console.log("[Scribe] Final latency:", latency, "ms")
-      setRecording((prev) => ({
-        ...prev,
-        latenciesMs: [...prev.latenciesMs.slice(-29), latency],
-      }))
+    if (data.text && data.text.length > 0) {
+      // Add to final transcripts
+      finalTranscriptsRef.current = [...finalTranscriptsRef.current, data.text]
+
+      // Update local transcript
+      setLocalTranscript(finalTranscriptsRef.current.join(" "))
+
+      if (segmentStartMsRef.current != null) {
+        const latency = performance.now() - segmentStartMsRef.current
+        setRecording((prev) => ({
+          ...prev,
+          latenciesMs: [...prev.latenciesMs.slice(-29), latency],
+        }))
+      }
     }
-    // Reset to null like xi does
     segmentStartMsRef.current = null
   }, [])
 
   const onError = useCallback((error: Error | Event) => {
     console.error("[Scribe] Error:", error)
+
+    // Ignore errors if we're not supposed to be connected
+    if (connectionStateRef.current !== "connected") {
+      console.log("[Scribe] Ignoring error - not connected")
+      return
+    }
+
     const errorMessage =
       error instanceof Error ? error.message : "Transcription error"
 
-    // Clear any existing error timeout
     if (errorTimeoutRef.current) {
       clearTimeout(errorTimeoutRef.current)
     }
 
-    // Only show errors that persist for more than 500ms (debounce transient errors)
     errorTimeoutRef.current = setTimeout(() => {
+      if (connectionStateRef.current !== "connected") return
+
       setRecording((prev) => ({
         ...prev,
         error: errorMessage,
       }))
-      // Play error sound
       errorSoundRef.current?.play().catch(() => {})
     }, 500)
   }, [])
 
-  // Memoize the configuration object to prevent useScribe from re-initializing
   const scribeConfig = useMemo(
     () => ({
       modelId: "scribe_realtime_v2" as const,
@@ -303,81 +341,94 @@ export default function RealtimeTranscriber01() {
 
   const scribe = useScribe(scribeConfig)
 
-  // Simulate audio chunk timing - set timer when likely sending audio
+  // Clear transcript when not connected
   useEffect(() => {
-    if (!scribe.isConnected) return
+    if (connectionState !== "connected") {
+      setLocalTranscript("")
+    }
+  }, [connectionState])
 
-    // While connected, continuously set timer to simulate audio chunks being sent
-    // This approximates xi's sendAudioChunk behavior
-    const interval = setInterval(() => {
-      // Only set if null (like xi does: if (this.segmentStartMs == null))
+  // Simulate audio chunk timing for latency measurement
+  useEffect(() => {
+    // Clear any existing interval
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current)
+      timerIntervalRef.current = null
+    }
+
+    if (connectionState !== "connected") return
+
+    timerIntervalRef.current = setInterval(() => {
       if (segmentStartMsRef.current === null) {
         segmentStartMsRef.current = performance.now()
-        console.log("[Scribe] Timer set (simulating audio chunk)")
       }
-    }, 100) // Check every 100ms (audio chunks are typically sent frequently)
+    }, 100)
 
-    return () => clearInterval(interval)
-  }, [scribe.isConnected])
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current)
+        timerIntervalRef.current = null
+      }
+    }
+  }, [connectionState])
 
   const handleToggleRecording = useCallback(async () => {
-    // Handle disconnect request
-    if (scribe.isConnected || scribe.status === "connecting") {
-      console.log("[Scribe] Disconnect requested")
-      shouldBeConnectedRef.current = false
-      setIsOperating(true) // Prevent re-entry during disconnect
+    const now = Date.now()
+    const timeSinceLastOp = now - lastOperationTimeRef.current
 
-      // Clear any pending error timeouts
-      if (errorTimeoutRef.current) {
-        clearTimeout(errorTimeoutRef.current)
-        errorTimeoutRef.current = null
+    // DISCONNECT
+    if (connectionState === "connected" || connectionState === "connecting") {
+      console.log("[Scribe] Disconnecting...")
+
+      // 1. Update UI state immediately
+      updateConnectionState("idle")
+      setLocalTranscript("")
+      setRecording({ error: "", latenciesMs: [] })
+      clearSessionRefs()
+
+      // 2. Disconnect (async, don't wait)
+      try {
+        scribe.disconnect()
+        scribe.clearTranscripts()
+      } catch {
+        // Ignore errors
       }
 
-      // Disconnect immediately
-      console.log("[Scribe] Disconnecting...")
-      scribe.disconnect()
-      scribe.clearTranscripts()
-      segmentStartMsRef.current = null
-      setRecording((prev) => ({ ...prev, latenciesMs: [], error: "" }))
-
-      // Play end sound (reset first for reliability)
+      // 3. Play sound
       if (endSoundRef.current) {
         endSoundRef.current.currentTime = 0
         endSoundRef.current.play().catch(() => {})
       }
 
-      // Reset operating flag after a short delay
-      setTimeout(() => {
-        setIsOperating(false)
-      }, 300)
+      lastOperationTimeRef.current = now
       return
     }
 
-    // Prevent multiple simultaneous connect operations
-    if (isOperating) {
-      console.log("[Scribe] Operation already in progress, ignoring")
+    // Debounce rapid clicks for CONNECT
+    if (timeSinceLastOp < 200) {
+      console.log("[Scribe] Ignoring rapid click")
+      return
+    }
+    lastOperationTimeRef.current = now
+
+    // CONNECT
+    if (connectionState !== "idle") {
+      console.log("[Scribe] Not in idle state, ignoring")
       return
     }
 
-    shouldBeConnectedRef.current = true
-    setIsOperating(true)
+    console.log("[Scribe] Connecting...")
+    updateConnectionState("connecting")
+    setLocalTranscript("")
+    setRecording({ error: "", latenciesMs: [] })
+    clearSessionRefs()
 
     try {
-      console.log("[Scribe] Fetching token...")
-
-      // Clear any pending error timeouts
-      if (errorTimeoutRef.current) {
-        clearTimeout(errorTimeoutRef.current)
-        errorTimeoutRef.current = null
-      }
-      setRecording((prev) => ({ ...prev, error: "", latenciesMs: [] }))
-      segmentStartMsRef.current = null
-
       const result = await getScribeToken()
 
-      // Check if user still wants to connect after token fetch
-      if (!shouldBeConnectedRef.current) {
-        console.log("[Scribe] User cancelled during token fetch")
+      // Check if user cancelled using ref (gets current value)
+      if (connectionStateRef.current === "idle") {
+        console.log("[Scribe] Cancelled during token fetch")
         return
       }
 
@@ -385,7 +436,6 @@ export default function RealtimeTranscriber01() {
         throw new Error(result.error || "Failed to get token")
       }
 
-      console.log("[Scribe] Connecting...")
       await scribe.connect({
         token: result.token,
         languageCode: selectedLanguage || undefined,
@@ -396,70 +446,44 @@ export default function RealtimeTranscriber01() {
         },
       })
 
-      console.log("[Scribe] Connected successfully")
-
-      // Check if user still wants to be connected
-      if (!shouldBeConnectedRef.current) {
-        console.log(
-          "[Scribe] User cancelled during connection, disconnecting..."
-        )
-        scribe.disconnect()
-        scribe.clearTranscripts()
-        segmentStartMsRef.current = null
-        setRecording((prev) => ({ ...prev, latenciesMs: [], error: "" }))
-        if (endSoundRef.current) {
-          endSoundRef.current.currentTime = 0
-          endSoundRef.current.play().catch(() => {})
+      // Check again after connect completes
+      if (connectionStateRef.current !== "connecting") {
+        console.log("[Scribe] Cancelled after connection")
+        try {
+          scribe.disconnect()
+        } catch {
+          // Ignore
         }
         return
       }
 
-      // Play start sound with a small delay for reliability
-      setTimeout(() => {
-        if (
-          shouldBeConnectedRef.current &&
-          scribe.isConnected &&
-          startSoundRef.current
-        ) {
-          console.log("[Scribe] Playing start sound")
-          startSoundRef.current.currentTime = 0
-          startSoundRef.current
-            .play()
-            .then(() => console.log("[Scribe] Start sound played"))
-            .catch((err) => console.error("[Scribe] Start sound failed:", err))
-        } else {
-          console.log("[Scribe] Start sound conditions not met:", {
-            shouldBeConnected: shouldBeConnectedRef.current,
-            isConnected: scribe.isConnected,
-            hasAudio: !!startSoundRef.current,
-          })
-        }
-      }, 50)
+      console.log("[Scribe] Connected")
+      updateConnectionState("connected")
+
+      // Play start sound
+      if (startSoundRef.current) {
+        startSoundRef.current.currentTime = 0
+        startSoundRef.current.play().catch(() => {})
+      }
     } catch (error) {
       console.error("[Scribe] Connection error:", error)
-      shouldBeConnectedRef.current = false
+      updateConnectionState("idle")
       setRecording((prev) => ({
         ...prev,
-        error:
-          error instanceof Error ? error.message : "Failed to start recording",
+        error: error instanceof Error ? error.message : "Connection failed",
       }))
-    } finally {
-      setIsOperating(false)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    isOperating,
-    scribe.connect,
-    scribe.disconnect,
-    scribe.clearTranscripts,
-    scribe.isConnected,
-    scribe.status,
+    clearSessionRefs,
+    connectionState,
+    scribe,
     selectedLanguage,
+    updateConnectionState,
   ])
 
+  // Cmd+K / Ctrl+K shortcut
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Cmd+K (Mac) or Ctrl+K (Windows/Linux) to toggle recording
       if (
         e.key === "k" &&
         (e.metaKey || e.ctrlKey) &&
@@ -477,7 +501,10 @@ export default function RealtimeTranscriber01() {
     }
   }, [handleToggleRecording])
 
-  // Preload audio files on mount
+  // Note: No unmount cleanup - React Strict Mode causes issues
+  // The browser will handle websocket cleanup on page unload
+
+  // Preload audio files on mount (no auto-play)
   useEffect(() => {
     const sounds = [
       {
@@ -494,66 +521,28 @@ export default function RealtimeTranscriber01() {
       },
     ]
 
-    // Preload all sounds and ensure they're ready to play
     sounds.forEach(({ ref, url }) => {
       const audio = new Audio(url)
       audio.volume = 0.6
       audio.preload = "auto"
-
-      // Force load the audio
       audio.load()
-
-      // Play silently once to "unlock" audio playback (browser requirement)
-      const unlockAudio = () => {
-        audio
-          .play()
-          .then(() => {
-            audio.pause()
-            audio.currentTime = 0
-          })
-          .catch(() => {
-            // Autoplay blocked, will work after user interaction
-          })
-      }
-
-      // Try to unlock audio on first interaction
-      if (audio.readyState >= 2) {
-        unlockAudio()
-      } else {
-        audio.addEventListener("canplaythrough", unlockAudio, { once: true })
-      }
-
       ref.current = audio
     })
   }, [])
 
-  const fullTranscript = useMemo(
-    () =>
-      scribe.finalTranscripts.map((t: { text: string }) => t.text).join(" "),
-    [scribe.finalTranscripts]
-  )
+  // Display text: prefer error, then local transcript
+  const displayText = recording.error || localTranscript
+  const hasContent = Boolean(displayText) && connectionState === "connected"
 
-  // Create a stable displayText that only changes when actual text changes
-  const displayText = useMemo(() => {
-    const text = recording.error || scribe.partialTranscript || fullTranscript
-    return text
-  }, [recording.error, scribe.partialTranscript, fullTranscript])
-
-  // Use a ref for previous displayText to avoid unnecessary re-renders
-  const prevDisplayTextRef = useRef(displayText)
-  const stableDisplayText = useMemo(() => {
-    if (displayText !== prevDisplayTextRef.current) {
-      prevDisplayTextRef.current = displayText
-    }
-    return prevDisplayTextRef.current
-  }, [displayText])
-
-  const hasContent = Boolean(stableDisplayText)
+  // Determine if current transcript is partial (for styling)
+  const isPartial = Boolean(lastTranscriptRef.current)
 
   return (
     <div className="relative mx-auto flex h-full w-full max-w-4xl flex-col items-center justify-center">
-      {/* Bottom aura effect - Multi-layered prismatic glow */}
-      <BackgroundAura status={scribe.status} isConnected={scribe.isConnected} />
+      <BackgroundAura
+        status={connectionState === "connecting" ? "connecting" : scribe.status}
+        isConnected={connectionState === "connected"}
+      />
 
       <style jsx>{`
         @keyframes shimmer {
@@ -590,110 +579,118 @@ export default function RealtimeTranscriber01() {
       <div className="relative flex h-full w-full flex-col items-center justify-center gap-8 overflow-hidden px-8 py-12">
         {/* Main transcript area */}
         <div className="relative flex min-h-[350px] w-full flex-1 items-center justify-center overflow-hidden">
-          {hasContent && (
-            <TranscriberTranscript
-              transcript={stableDisplayText}
-              error={recording.error}
-              isPartial={Boolean(scribe.partialTranscript)}
-              isConnected={scribe.isConnected}
-            />
-          )}
+          {/* Transcript - shown when there's content */}
+          <div
+            className={cn(
+              "absolute inset-0 transition-opacity duration-250",
+              hasContent ? "opacity-100" : "pointer-events-none opacity-0"
+            )}
+          >
+            {hasContent && (
+              <TranscriberTranscript
+                transcript={displayText}
+                error={recording.error}
+                isPartial={isPartial}
+                isConnected={connectionState === "connected"}
+              />
+            )}
+          </div>
 
-          {!hasContent && (
-            <div className="flex max-h-full w-full max-w-sm flex-col items-center gap-8 overflow-y-auto">
-              {/* Status text - transitions smoothly between states */}
-              <div className="relative flex min-h-[48px] w-full items-center justify-center">
-                <div
-                  className={cn(
-                    "absolute inset-0 flex items-center justify-center transition-opacity duration-500",
-                    scribe.status === "connecting"
-                      ? "opacity-100"
-                      : "pointer-events-none opacity-0"
-                  )}
-                >
-                  <ShimmeringText
-                    text="Connecting..."
-                    className="text-2xl font-light tracking-wide whitespace-nowrap"
+          {/* Status text - shown when no content */}
+          <div
+            className={cn(
+              "absolute inset-0 flex items-center justify-center transition-opacity duration-250",
+              !hasContent ? "opacity-100" : "pointer-events-none opacity-0"
+            )}
+          >
+            <div
+              className={cn(
+                "absolute transition-opacity duration-250",
+                connectionState === "connecting"
+                  ? "opacity-100"
+                  : "pointer-events-none opacity-0"
+              )}
+            >
+              <ShimmeringText
+                text="Connecting..."
+                className="text-2xl font-light tracking-wide whitespace-nowrap"
+              />
+            </div>
+            <div
+              className={cn(
+                "absolute transition-opacity duration-250",
+                connectionState === "connected" && !hasContent
+                  ? "opacity-100"
+                  : "pointer-events-none opacity-0"
+              )}
+            >
+              <ShimmeringText
+                text="Say something aloud..."
+                className="text-3xl font-light tracking-wide whitespace-nowrap"
+              />
+            </div>
+          </div>
+
+          {/* Language selector and button - only shown when not connected */}
+          <div
+            className={cn(
+              "absolute inset-0 flex items-center justify-center transition-opacity duration-250",
+              connectionState === "idle"
+                ? "opacity-100"
+                : "pointer-events-none opacity-0"
+            )}
+          >
+            <div className="flex w-full max-w-sm flex-col gap-4 px-8">
+              <div className="flex flex-col items-center gap-6">
+                <div className="flex flex-col items-center gap-2 text-center">
+                  <h1 className="text-2xl font-semibold tracking-tight">
+                    Realtime Speech to Text
+                  </h1>
+                  <p className="text-muted-foreground text-sm">
+                    Transcribe your voice in real-time with high accuracy
+                  </p>
+                </div>
+
+                <div className="w-full space-y-2">
+                  <label className="text-foreground/70 text-sm font-medium">
+                    Language
+                  </label>
+                  <LanguageSelector
+                    value={selectedLanguage}
+                    onValueChange={setSelectedLanguage}
+                    disabled={connectionState !== "idle"}
                   />
                 </div>
-                <div
-                  className={cn(
-                    "absolute inset-0 flex items-center justify-center transition-opacity duration-500",
-                    scribe.isConnected
-                      ? "opacity-100"
-                      : "pointer-events-none opacity-0"
-                  )}
+
+                <Button
+                  onClick={handleToggleRecording}
+                  disabled={false}
+                  size="lg"
+                  className="bg-foreground/95 hover:bg-foreground/90 w-full justify-center gap-3"
                 >
-                  <ShimmeringText
-                    text="Say something aloud..."
-                    className="text-3xl font-light tracking-wide whitespace-nowrap"
-                  />
-                </div>
-              </div>
+                  <span>Start Transcribing</span>
+                  <kbd className="border-background/20 bg-background/10 hidden h-5 items-center gap-1 rounded border px-1.5 font-mono text-xs sm:inline-flex">
+                    {isMac ? "⌘K" : "Ctrl+K"}
+                  </kbd>
+                </Button>
 
-              {/* Language selector and button */}
-              <div
-                className={cn(
-                  "flex w-full flex-col gap-4 transition-opacity duration-500",
-                  !scribe.isConnected && scribe.status !== "connecting"
-                    ? "opacity-100"
-                    : "pointer-events-none opacity-0"
-                )}
-              >
-                <div className="flex flex-col items-center gap-6">
-                  <div className="flex flex-col items-center gap-2 text-center">
-                    <h1 className="text-2xl font-semibold tracking-tight">
-                      Realtime Speech to Text
-                    </h1>
-                    <p className="text-muted-foreground text-sm">
-                      Transcribe your voice in real-time with high accuracy
-                    </p>
-                  </div>
-
-                  <div className="w-full space-y-2">
-                    <label className="text-foreground/70 text-sm font-medium">
-                      Language
-                    </label>
-                    <LanguageSelector
-                      value={selectedLanguage}
-                      onValueChange={setSelectedLanguage}
-                      disabled={
-                        scribe.isConnected || scribe.status === "connecting"
-                      }
-                    />
-                  </div>
-
-                  <Button
-                    onClick={handleToggleRecording}
-                    disabled={isOperating}
-                    size="lg"
-                    className="bg-foreground/95 hover:bg-foreground/90 w-full justify-center gap-3"
+                <Badge variant="outline" asChild>
+                  <Link
+                    href="https://elevenlabs.io/speech-to-text"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-foreground/60 hover:text-foreground/80 transition-colors"
                   >
-                    <span>Start Transcribing</span>
-                    <kbd className="border-background/20 bg-background/10 hidden h-5 items-center gap-1 rounded border px-1.5 font-mono text-xs sm:inline-flex">
-                      {isMac ? "⌘K" : "Ctrl+K"}
-                    </kbd>
-                  </Button>
-
-                  <Badge variant="outline" asChild>
-                    <Link
-                      href="https://elevenlabs.io/speech-to-text"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-foreground/60 hover:text-foreground/80 transition-colors"
-                    >
-                      Powered by ElevenLabs Speech to Text
-                    </Link>
-                  </Badge>
-                </div>
+                    Powered by ElevenLabs Speech to Text
+                  </Link>
+                </Badge>
               </div>
             </div>
-          )}
+          </div>
         </div>
 
-        {/* Bottom controls - stop button */}
         <BottomControls
-          isConnected={scribe.isConnected}
+          isConnected={connectionState === "connected"}
           hasError={Boolean(recording.error)}
           isMac={isMac}
           onStop={handleToggleRecording}
@@ -724,7 +721,6 @@ const TranscriberTranscript = React.memo(
     const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
     // Auto-scroll to bottom when connected and text is updating
-    // Throttled to avoid excessive scroll updates
     useEffect(() => {
       if (isConnected && scrollRef.current) {
         if (scrollTimeoutRef.current) {
@@ -734,7 +730,7 @@ const TranscriberTranscript = React.memo(
           if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight
           }
-        }, 50) // Throttle scroll updates to 50ms
+        }, 50)
       }
       return () => {
         if (scrollTimeoutRef.current) {
@@ -760,7 +756,6 @@ const TranscriberTranscript = React.memo(
               )}
             >
               {characters.map((char, index) => {
-                // Only animate new characters (those after previousNumChars)
                 const delay =
                   index >= previousNumChars
                     ? (index - previousNumChars + 1) * 0.012
