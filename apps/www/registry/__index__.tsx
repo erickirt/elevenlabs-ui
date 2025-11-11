@@ -381,7 +381,7 @@ export const Index: Record<string, any> = {
       const exportName = Object.keys(mod).find(key => typeof mod[key] === 'function' || typeof mod[key] === 'object') || item.name
       return { default: mod.default || mod[exportName] }
     }),
-    categories: ["audio-beta"],
+    categories: ["audio"],
     meta: {"iframeHeight":"800px","container":"w-full bg-surface min-h-svh flex px-4 py-12 items-center md:py-20 justify-center min-w-0","mobile":"component"},
   },
   "voice-chat-01": {

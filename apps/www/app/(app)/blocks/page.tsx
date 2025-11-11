@@ -4,6 +4,7 @@ export const dynamic = "force-static"
 export const revalidate = false
 
 const FEATURED_BLOCKS = [
+  "realtime-transcriber-01",
   "voice-chat-01",
   "pong-01",
   "transcriber-01",

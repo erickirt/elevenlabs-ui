@@ -98,7 +98,7 @@ export const blocks: Registry["items"] = [
         "w-full bg-surface min-h-svh flex px-4 py-12 items-center md:py-20 justify-center min-w-0",
       mobile: "component",
     },
-    categories: ["audio-beta"],
+    categories: ["audio"],
   },
   {
     name: "voice-chat-01",
