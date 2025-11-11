@@ -13,6 +13,7 @@ import { PageNav } from "@/components/page-nav"
 import { ThemeSelector } from "@/components/theme-selector"
 import Speaker01 from "@/registry/elevenlabs-ui/blocks/speaker-01/page"
 import { Button } from "@/registry/elevenlabs-ui/ui/button"
+import { Announcement } from "@/components/announcement"
 
 const title = "ElevenLabs UI"
 const description =
@@ -57,7 +58,9 @@ export default function IndexPage() {
           }}
         />
         <PageHeader className="relative z-10">
+        <Announcement />
           <PageHeaderHeading className="max-w-4xl">
+         
             <span className="flex items-baseline gap-2 sm:gap-3">
               <span className="font-waldenburg-ht leading-[0.95] font-bold tracking-[-0.03em]">
                 ElevenLabs
