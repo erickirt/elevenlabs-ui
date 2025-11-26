@@ -5,3 +5,4 @@ packages:
   - "!**/fixtures/**"
   - "!**/temp/**"
   - "!packages/tests/temp/**"
+minimumReleaseAge: 10080 # 1 week
