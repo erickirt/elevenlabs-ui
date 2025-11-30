@@ -208,4 +208,20 @@ export const ui: Registry["items"] = [
       },
     ],
   },
+  {
+    name: "speech-input",
+    type: "registry:ui",
+    dependencies: ["motion", "lucide-react"],
+    registryDependencies: [
+      "button",
+      "skeleton",
+      "https://ui.elevenlabs.io/r/use-scribe.json",
+    ],
+    files: [
+      {
+        path: "ui/speech-input.tsx",
+        type: "registry:ui",
+      },
+    ],
+  },
 ]
