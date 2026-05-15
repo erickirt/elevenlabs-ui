@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { ComponentProps } from "react"
 import {
+  ConversationProvider,
   useConversation,
   useConversationControls,
   useConversationStatus,
@@ -111,6 +112,14 @@ const ChatAction = ({
 }
 
 export default function Page() {
+  return (
+    <ConversationProvider>
+      <VoiceChat01 />
+    </ConversationProvider>
+  )
+}
+
+export function VoiceChat01() {
   const { status } = useConversationStatus()
   const {
     startSession,

@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react"
 import {
+  ConversationProvider,
   useConversationControls,
   useConversationStatus,
 } from "@elevenlabs/react"
@@ -21,6 +22,14 @@ const DEFAULT_AGENT = {
 }
 
 export default function Page() {
+  return (
+    <ConversationProvider>
+      <VoiceChat02 />
+    </ConversationProvider>
+  )
+}
+
+export function VoiceChat02() {
   const { status } = useConversationStatus()
   const { startSession, endSession, getInputVolume, getOutputVolume } =
     useConversationControls()
